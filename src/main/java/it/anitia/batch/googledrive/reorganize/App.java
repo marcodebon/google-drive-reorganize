@@ -310,6 +310,14 @@ public class App {
 			return folderCache.get(cacheKey);
 		}
 
+		// In dry run mode with fake parent, skip API call and return fake ID
+		if (dryRun && parentId.startsWith("dryrun-")) {
+			logger.info("[DRY RUN] Creazione cartella \"{}\" in {}", folderName, parentId);
+			String fakeFolderId = "dryrun-" + cacheKey.hashCode();
+			folderCache.put(cacheKey, fakeFolderId);
+			return fakeFolderId;
+		}
+
 		String query = String.format("name='%s' and '%s' in parents and mimeType='%s' and trashed=false",
 				folderName, parentId, FOLDER_MIME_TYPE);
 		Drive.Files.List request = service.files().list()
