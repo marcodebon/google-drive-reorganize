@@ -17,6 +17,7 @@ public class Settings {
 	public static class operation {
 		public static int retry = 3;
 		public static int sleepRetry = 10;
+		public static int maxThreads = 10;
 	}
 
 	public static class folder {
@@ -27,6 +28,13 @@ public class Settings {
 		public static class destination {
 			public static String id;
 		}
+		public static class glacier {
+			public static String id;
+		}
+	}
+
+	public static class glacier {
+		public static int maxZipSizeMB = 10;
 	}
 
 	private Settings() {
@@ -45,6 +53,8 @@ public class Settings {
 			operation.retry = Integer.parseInt(System.getProperty("googledrivereorganize.operation.retry"));
 		if (System.getProperty("googledrivereorganize.operation.sleepRetry") != null)
 			operation.sleepRetry = Integer.parseInt(System.getProperty("googledrivereorganize.operation.sleepRetry"));
+		if (System.getProperty("googledrivereorganize.operation.maxThreads") != null)
+			operation.maxThreads = Integer.parseInt(System.getProperty("googledrivereorganize.operation.maxThreads"));
 
 		if (System.getProperty("googledrivereorganize.folder.source.id") != null)
 			folder.source.id = System.getProperty("googledrivereorganize.folder.source.id");
@@ -53,6 +63,11 @@ public class Settings {
 
 		if (System.getProperty("googledrivereorganize.folder.destination.id") != null)
 			folder.destination.id = System.getProperty("googledrivereorganize.folder.destination.id");
+
+		if (System.getProperty("googledrivereorganize.folder.glacier.id") != null)
+			folder.glacier.id = System.getProperty("googledrivereorganize.folder.glacier.id");
+		if (System.getProperty("googledrivereorganize.glacier.maxZipSizeMB") != null)
+			glacier.maxZipSizeMB = Integer.parseInt(System.getProperty("googledrivereorganize.glacier.maxZipSizeMB"));
 
 		file = new File(propertiesFile);
 
@@ -68,6 +83,8 @@ public class Settings {
 					operation.retry = Integer.parseInt(properties.get("operation.retry").toString());
 				if (properties.containsKey("operation.sleepRetry"))
 					operation.sleepRetry = Integer.parseInt(properties.get("operation.sleepRetry").toString());
+				if (properties.containsKey("operation.maxThreads"))
+					operation.maxThreads = Integer.parseInt(properties.get("operation.maxThreads").toString());
 
 				if (properties.containsKey("folder.source.id"))
 					folder.source.id = properties.get("folder.source.id").toString();
@@ -76,6 +93,11 @@ public class Settings {
 
 				if (properties.containsKey("folder.destination.id"))
 					folder.destination.id = properties.get("folder.destination.id").toString();
+
+				if (properties.containsKey("folder.glacier.id"))
+					folder.glacier.id = properties.get("folder.glacier.id").toString();
+				if (properties.containsKey("glacier.maxZipSizeMB"))
+					glacier.maxZipSizeMB = Integer.parseInt(properties.get("glacier.maxZipSizeMB").toString());
 			}
 			catch (IOException e) {
 				throw e;
@@ -85,9 +107,12 @@ public class Settings {
 		logger.info("serviceAccountKeyFile........: '{}'", serviceAccountKeyFile);
 		logger.info("operation.retry..............: {}", operation.retry);
 		logger.info("operation.sleepRetry.........: {}", operation.sleepRetry);
+		logger.info("operation.maxThreads.........: {}", operation.maxThreads);
 		logger.info("folder.source.id.............: '{}'", folder.source.id);
 		logger.info("folder.source.recursive......: {}", folder.source.recursive);
 		logger.info("folder.destination.id........: '{}'", folder.destination.id);
+		logger.info("folder.glacier.id............: '{}'", folder.glacier.id);
+		logger.info("glacier.maxZipSizeMB.........: {}", glacier.maxZipSizeMB);
 
 		if (null == folder.source.id || folder.source.id.isBlank() || folder.source.id.isEmpty())
 			throw new Exception("configurazione \"folder.source.id\" assente");
