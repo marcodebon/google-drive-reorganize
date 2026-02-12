@@ -20,6 +20,8 @@ public class Settings {
 		public static int maxThreads = 10;
 	}
 
+	public static String workingDir = ".";
+
 	public static class folder {
 		public static class source {
 			public static String id;
@@ -56,6 +58,9 @@ public class Settings {
 		if (System.getProperty("googledrivereorganize.operation.maxThreads") != null)
 			operation.maxThreads = Integer.parseInt(System.getProperty("googledrivereorganize.operation.maxThreads"));
 
+		if (System.getProperty("googledrivereorganize.workingDir") != null)
+			workingDir = System.getProperty("googledrivereorganize.workingDir");
+
 		if (System.getProperty("googledrivereorganize.folder.source.id") != null)
 			folder.source.id = System.getProperty("googledrivereorganize.folder.source.id");
 		if (System.getProperty("googledrivereorganize.folder.source.recursive") != null)
@@ -86,6 +91,9 @@ public class Settings {
 				if (properties.containsKey("operation.maxThreads"))
 					operation.maxThreads = Integer.parseInt(properties.get("operation.maxThreads").toString());
 
+				if (properties.containsKey("workingDir"))
+					workingDir = properties.get("workingDir").toString();
+
 				if (properties.containsKey("folder.source.id"))
 					folder.source.id = properties.get("folder.source.id").toString();
 				if (properties.containsKey("folder.source.recursive"))
@@ -105,6 +113,7 @@ public class Settings {
 		}
 
 		logger.info("serviceAccountKeyFile........: '{}'", serviceAccountKeyFile);
+		logger.info("workingDir...................: '{}'", workingDir);
 		logger.info("operation.retry..............: {}", operation.retry);
 		logger.info("operation.sleepRetry.........: {}", operation.sleepRetry);
 		logger.info("operation.maxThreads.........: {}", operation.maxThreads);

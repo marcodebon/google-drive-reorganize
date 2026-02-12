@@ -32,6 +32,7 @@ import java.util.stream.Collectors;
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
 
+import com.google.api.client.http.HttpResponseException;
 import com.google.api.client.http.javanet.NetHttpTransport;
 import com.google.api.client.json.JsonFactory;
 import com.google.api.client.json.gson.GsonFactory;
@@ -53,9 +54,8 @@ public class App {
 	private static final Pattern DATE_PATTERN = Pattern.compile("(\\d{4})[-_](\\d{2})[-_](\\d{2})");
 	// 2) YYYYMMDD compatto (8 cifre consecutive, anche precedute da D come in CAMS)
 	private static final Pattern DATE_COMPACT_PATTERN = Pattern.compile("D?(\\d{4})(\\d{2})(\\d{2})");
-	// 3) PDF provincia: XX-NN-ANNO-SEQ dove ANNO e' 2 o 4 cifre
-	private static final Pattern PROVINCE_PDF_PATTERN = Pattern.compile("^[A-Z]{2}-\\d{2}-(\\d{2,4})-\\d+\\.pdf$");
-
+	// 2b) Come sopra ma con opzionale HHmmss (per normalizzazione groupKey)
+	private static final Pattern DATE_COMPACT_HHMMSS_PATTERN = Pattern.compile("D?(\\d{4})(\\d{2})(\\d{2})(?:\\d{6})?");
 	private static boolean executeReorganize = false;
 	private static boolean executeList = false;
 	private static boolean executeAnalyze = false;
@@ -464,23 +464,6 @@ public class App {
 			}
 		}
 
-		// 3) PDF provincia: XX-NN-ANNO-SEQ.pdf (solo anno, mese non disponibile)
-		Matcher provinceMatcher = PROVINCE_PDF_PATTERN.matcher(fileName);
-		if (provinceMatcher.find()) {
-			String yearStr = provinceMatcher.group(1);
-			int y;
-			if (yearStr.length() == 2) {
-				y = 2000 + Integer.parseInt(yearStr);
-				yearStr = String.valueOf(y);
-			} else {
-				y = Integer.parseInt(yearStr);
-			}
-			if (y >= 2000 && y <= 2100) {
-				// Nessun mese disponibile, ritorna "00" come segnale
-				return new String[]{yearStr, "00"};
-			}
-		}
-
 		return null;
 	}
 
@@ -658,7 +641,6 @@ public class App {
 	static String normalizeFileName(String fileName) {
 		String result = DATE_PATTERN.matcher(fileName).replaceAll("YYYY-MM-DD");
 		result = DATE_COMPACT_PATTERN.matcher(result).replaceAll("YYYYMMDD");
-		result = PROVINCE_PDF_PATTERN.matcher(result).replaceAll("XX-NN-YYYY-SEQ.pdf");
 		return result;
 	}
 
@@ -757,7 +739,10 @@ public class App {
 			return 0;
 		}
 
-		int deleted = 0;
+		// Prima raccoglie tutte le sottocartelle (tutte le pagine), poi le elabora.
+		// Separare listing da cancellazione evita che il pageToken diventi stale
+		// a causa delle eliminazioni, causando un loop infinito.
+		List<File> allFolders = new ArrayList<>();
 		String pageToken = null;
 		do {
 			String folderQuery = String.format("'%s' in parents and mimeType='%s' and trashed=false", folderId, FOLDER_MIME_TYPE);
@@ -772,26 +757,32 @@ public class App {
 
 			List<File> folders = folderResult.getFiles();
 			if (folders != null) {
-				for (File folder : folders) {
-					// Ricorsione bottom-up: prima pulisci le sottocartelle
-					deleted += deleteEmptyFolders(service, folder.getId(), true);
-
-					// Verifica se la cartella e' ora vuota (nessun file e nessuna sottocartella)
-					if (isFolderEmpty(service, folder.getId())) {
-						if (dryRun) {
-							logger.info("[DRY RUN] Eliminazione cartella vuota \"{}\" (ID: {})", folder.getName(), folder.getId());
-						} else {
-							service.files().delete(folder.getId())
-									.setSupportsAllDrives(true)
-									.execute();
-							logger.info("Cartella vuota \"{}\" eliminata (ID: {})", folder.getName(), folder.getId());
-						}
-						deleted++;
-					}
-				}
+				allFolders.addAll(folders);
 			}
 			pageToken = folderResult.getNextPageToken();
 		} while (pageToken != null);
+
+		logger.info("Pulizia: trovate {} sottocartelle in {}", allFolders.size(), folderId);
+
+		int deleted = 0;
+		for (File folder : allFolders) {
+			// Ricorsione bottom-up: prima pulisci le sottocartelle
+			logger.debug("Pulizia: entro nella cartella \"{}\" (ID: {})", folder.getName(), folder.getId());
+			deleted += deleteEmptyFolders(service, folder.getId(), true);
+
+			// Verifica se la cartella e' ora vuota (nessun file e nessuna sottocartella)
+			if (isFolderEmpty(service, folder.getId())) {
+				if (dryRun) {
+					logger.info("[DRY RUN] Eliminazione cartella vuota \"{}\" (ID: {})", folder.getName(), folder.getId());
+				} else {
+					service.files().delete(folder.getId())
+							.setSupportsAllDrives(true)
+							.execute();
+					logger.info("Cartella vuota \"{}\" eliminata (ID: {})", folder.getName(), folder.getId());
+				}
+				deleted++;
+			}
+		}
 
 		return deleted;
 	}
@@ -819,9 +810,11 @@ public class App {
 		while (result.contains(".")) {
 			result = result.substring(0, result.lastIndexOf('.'));
 		}
-		// Rimuovi date dai pattern conosciuti
+		// Rimuovi date dai pattern conosciuti (incluso opzionale HHmmss per il formato compatto)
 		result = DATE_PATTERN.matcher(result).replaceAll("");
-		result = DATE_COMPACT_PATTERN.matcher(result).replaceAll("");
+		result = DATE_COMPACT_HHMMSS_PATTERN.matcher(result).replaceAll("");
+		// Rimuovi suffissi progressivi finali (es. _1, _2, _23)
+		result = result.replaceAll("_\\d+$", "");
 		// Pulisci separatori residui (trattini/underscore in coda o doppi)
 		result = result.replaceAll("[-_]+$", "");
 		result = result.replaceAll("^[-_]+", "");
@@ -854,41 +847,116 @@ public class App {
 			}
 		}
 
-		// 3) PDF provincia: solo anno
-		Matcher provinceMatcher = PROVINCE_PDF_PATTERN.matcher(fileName);
-		if (provinceMatcher.find()) {
-			String yearStr = provinceMatcher.group(1);
-			if (yearStr.length() == 2) yearStr = "20" + yearStr;
-			return yearStr + "0101";
-		}
+
 
 		return null;
 	}
 
+	static String extractDateCompactFromModifiedTime(File file) {
+		DateTime modifiedTime = file.getModifiedTime();
+		if (modifiedTime == null) return null;
+		long timestamp = modifiedTime.getValue();
+		Instant instant = Instant.ofEpochMilli(timestamp);
+		LocalDate date = instant.atZone(ZoneId.systemDefault()).toLocalDate();
+		return String.format("%04d%02d%02d", date.getYear(), date.getMonthValue(), date.getDayOfMonth());
+	}
+
 	private static void downloadDriveFile(Drive service, String fileId, Path localPath) throws IOException {
-		try (OutputStream out = new FileOutputStream(localPath.toFile())) {
-			service.files().get(fileId)
-					.setSupportsAllDrives(true)
-					.executeMediaAndDownloadTo(out);
+		int retry = 0;
+		while (retry < Settings.operation.retry) {
+			try {
+				retry++;
+				// Delete any partial file from previous failed attempt
+				Files.deleteIfExists(localPath);
+				try (OutputStream out = new FileOutputStream(localPath.toFile())) {
+					service.files().get(fileId)
+							.setSupportsAllDrives(true)
+							.executeMediaAndDownloadTo(out);
+				}
+				return; // Success
+			} catch (IOException e) {
+				logger.warn("Tentativo {}/{} di download fallito: {}", retry, Settings.operation.retry, e.getMessage());
+				if (retry >= Settings.operation.retry) {
+					throw e;
+				}
+				logger.info("Nuovo tentativo tra {} secondi", Settings.operation.sleepRetry);
+				try {
+					Thread.sleep(Settings.operation.sleepRetry * 1000L);
+				} catch (InterruptedException ie) {
+					Thread.currentThread().interrupt();
+					throw new IOException("Download interrotto", ie);
+				}
+			}
 		}
+	}
+
+	private static void deleteDriveFile(Drive service, String fileId, String fileName) throws IOException {
+		int retry = 0;
+		while (retry < Settings.operation.retry) {
+			try {
+				retry++;
+				logger.debug("Tentativo {}/{} di eliminazione file \"{}\" (ID: {})", retry, Settings.operation.retry, fileName, fileId);
+				service.files().delete(fileId)
+						.setSupportsAllDrives(true)
+						.execute();
+				return; // Success
+			} catch (IOException e) {
+				logger.warn("Tentativo {}/{} di eliminazione file \"{}\" fallito: {}", retry, Settings.operation.retry, fileName, e.getMessage());
+				if (retry >= Settings.operation.retry) {
+					throw e;
+				}
+				logger.info("Nuovo tentativo tra {} secondi", Settings.operation.sleepRetry);
+				try {
+					Thread.sleep(Settings.operation.sleepRetry * 1000L);
+				} catch (InterruptedException ie) {
+					Thread.currentThread().interrupt();
+					throw new IOException("Eliminazione interrotta", ie);
+				}
+			}
+		}
+	}
+
+	private static String resolveZipEntryName(String fileName, java.util.Set<String> usedNames) {
+		if (usedNames.add(fileName)) {
+			return fileName;
+		}
+		String baseName = fileName;
+		String extension = "";
+		int lastDot = fileName.lastIndexOf('.');
+		if (lastDot > 0) {
+			baseName = fileName.substring(0, lastDot);
+			extension = fileName.substring(lastDot);
+		}
+		int counter = 2;
+		String candidate;
+		do {
+			candidate = baseName + "_" + counter + extension;
+			counter++;
+		} while (!usedNames.add(candidate));
+		return candidate;
 	}
 
 	private static List<java.io.File> createZipArchives(Drive service, List<File> driveFiles, String groupKey,
 			long maxZipBytes, Path tempDir) throws IOException {
-		// Sort files by date extracted from name
+		// Sort files by date extracted from name, fallback to modifiedTime
 		driveFiles.sort((a, b) -> {
 			String dateA = extractDateCompactFromFileName(a.getName());
+			if (dateA == null) dateA = extractDateCompactFromModifiedTime(a);
 			String dateB = extractDateCompactFromFileName(b.getName());
+			if (dateB == null) dateB = extractDateCompactFromModifiedTime(b);
 			if (dateA == null) dateA = "";
 			if (dateB == null) dateB = "";
 			return dateA.compareTo(dateB);
 		});
 
-		// Find dateMin and dateMax
+		// Find dateMin and dateMax (fallback to modifiedTime if no date in name)
 		String dateMin = null;
 		String dateMax = null;
 		for (File f : driveFiles) {
 			String d = extractDateCompactFromFileName(f.getName());
+			if (d == null) {
+				d = extractDateCompactFromModifiedTime(f);
+			}
 			if (d != null) {
 				if (dateMin == null || d.compareTo(dateMin) < 0) dateMin = d;
 				if (dateMax == null || d.compareTo(dateMax) > 0) dateMax = d;
@@ -914,6 +982,7 @@ public class App {
 			Path zipPath = tempDir.resolve(zipName);
 			long currentZipSize = 0;
 			int filesInThisPart = 0;
+			java.util.Set<String> usedEntryNames = new java.util.HashSet<>();
 
 			try (ZipOutputStream zos = new ZipOutputStream(new FileOutputStream(zipPath.toFile()))) {
 				while (fileIndex < driveFiles.size()) {
@@ -926,25 +995,41 @@ public class App {
 						break;
 					}
 
-					// Download to temp
-					Path tempFile = tempDir.resolve(driveFile.getName());
-					logger.debug("Download file \"{}\" (ID: {})", driveFile.getName(), driveFile.getId());
-					downloadDriveFile(service, driveFile.getId(), tempFile);
+					// Resolve duplicate entry names within the same zip
+					String entryName = resolveZipEntryName(driveFile.getName(), usedEntryNames);
+					if (!entryName.equals(driveFile.getName())) {
+						logger.info("File duplicato \"{}\" (ID: {}) rinominato in \"{}\" nello zip",
+								driveFile.getName(), driveFile.getId(), entryName);
+					}
 
 					// Add to zip
-					ZipEntry entry = new ZipEntry(driveFile.getName());
+					ZipEntry entry = new ZipEntry(entryName);
 					zos.putNextEntry(entry);
-					try (FileInputStream fis = new FileInputStream(tempFile.toFile())) {
-						byte[] buffer = new byte[8192];
-						int len;
-						while ((len = fis.read(buffer)) > 0) {
-							zos.write(buffer, 0, len);
+					if (size > 0) {
+						Path tempFile = tempDir.resolve(driveFile.getName());
+						logger.debug("Download file \"{}\" (ID: {})", driveFile.getName(), driveFile.getId());
+						try {
+							downloadDriveFile(service, driveFile.getId(), tempFile);
+							try (FileInputStream fis = new FileInputStream(tempFile.toFile())) {
+								byte[] buffer = new byte[8192];
+								int len;
+								while ((len = fis.read(buffer)) > 0) {
+									zos.write(buffer, 0, len);
+								}
+							}
+						} catch (HttpResponseException hre) {
+							if (hre.getStatusCode() == 416) {
+								logger.warn("File \"{}\" non scaricabile (HTTP 416), aggiunto entry vuota allo zip", driveFile.getName());
+							} else {
+								throw hre;
+							}
+						} finally {
+							Files.deleteIfExists(tempFile);
 						}
+					} else {
+						logger.debug("File \"{}\" ha dimensione 0, aggiunto entry vuota allo zip", driveFile.getName());
 					}
 					zos.closeEntry();
-
-					// Clean up temp file
-					Files.deleteIfExists(tempFile);
 
 					currentZipSize += size;
 					filesInThisPart++;
@@ -1051,114 +1136,126 @@ public class App {
 		} while (pageToken != null);
 	}
 
-	private static void processGlacierMonth(Drive service, String monthFolderId, String year, String month,
+	private static void processGlacierMonth(Drive service, String folderId, String year, String month,
 			String relativePath) throws IOException {
-		// Collect all files in this month folder (and subfolders for relativePath structure)
-		List<File> allFiles = new ArrayList<>();
-		collectFilesRecursive(service, monthFolderId, allFiles);
-
-		if (allFiles.isEmpty()) {
-			logger.debug("Nessun file nella cartella {}/{}", year, month);
-			return;
-		}
-
-		logger.info("Trovati {} file in {}/{}{}", allFiles.size(), year, month,
-				relativePath.isEmpty() ? "" : "/" + relativePath);
-
-		// Group by normalizeToGroupKey
-		Map<String, List<File>> groups = new HashMap<>();
-		for (File f : allFiles) {
-			String key = normalizeToGroupKey(f.getName());
-			groups.computeIfAbsent(key, k -> new ArrayList<>()).add(f);
-		}
-
-		long maxZipBytes = Settings.glacier.maxZipSizeMB * 1024L * 1024L;
-
-		for (Map.Entry<String, List<File>> entry : groups.entrySet()) {
-			String groupKey = entry.getKey();
-			List<File> groupFiles = entry.getValue();
-
-			logger.info("Glacier gruppo \"{}\" : {} file", groupKey, groupFiles.size());
-
-			// Create temp directory
-			Path tempDir = Files.createTempDirectory("glacier_");
-			try {
-				// Create ZIP archives
-				List<java.io.File> zips = createZipArchives(service, groupFiles, groupKey, maxZipBytes, tempDir);
-
-				// Ensure glacier destination path: glacier.id/YYYY/MM/[relativePath]
-				List<String> pathSegments = new ArrayList<>();
-				pathSegments.add(year);
-				pathSegments.add(month);
-				if (!relativePath.isEmpty()) {
-					for (String seg : relativePath.split("/")) {
-						if (!seg.isEmpty()) pathSegments.add(seg);
-					}
-				}
-				String glacierFolderId = ensureRemotePath(service, Settings.folder.glacier.id, pathSegments);
-
-				// Upload ZIPs
-				for (java.io.File zip : zips) {
-					uploadFile(service, glacierFolderId, zip);
-					glacierZipsCreated.incrementAndGet();
-				}
-
-				// Delete original files from Drive
-				for (File f : groupFiles) {
-					logger.debug("Eliminazione file originale \"{}\" (ID: {})", f.getName(), f.getId());
-					service.files().delete(f.getId())
-							.setSupportsAllDrives(true)
-							.execute();
-					glacierFilesArchived.incrementAndGet();
-				}
-			} finally {
-				// Cleanup temp directory
-				try {
-					Files.walk(tempDir)
-							.sorted((a, b) -> b.compareTo(a))
-							.forEach(p -> {
-								try { Files.deleteIfExists(p); } catch (IOException ignored) {}
-							});
-				} catch (IOException ignored) {}
-			}
-		}
-	}
-
-	private static void collectFilesRecursive(Drive service, String folderId, List<File> result) throws IOException {
-		// Collect files
+		// Collect files at this level only (con paginazione)
+		List<File> files = new ArrayList<>();
 		String pageToken = null;
 		do {
 			String fileQuery = String.format("'%s' in parents and mimeType!='%s' and trashed=false", folderId, FOLDER_MIME_TYPE);
 			FileList fileResult = service.files().list()
 					.setQ(fileQuery)
 					.setSpaces("drive")
-					.setFields("nextPageToken, files(id, name, size)")
+					.setFields("nextPageToken, files(id, name, size, modifiedTime)")
 					.setPageToken(pageToken)
 					.setSupportsAllDrives(true)
 					.setIncludeItemsFromAllDrives(true)
 					.execute();
 
 			if (fileResult.getFiles() != null) {
-				result.addAll(fileResult.getFiles());
+				files.addAll(fileResult.getFiles());
 			}
 			pageToken = fileResult.getNextPageToken();
 		} while (pageToken != null);
 
-		// Recurse into subfolders
-		String folderQuery = String.format("'%s' in parents and mimeType='%s' and trashed=false", folderId, FOLDER_MIME_TYPE);
-		FileList folderResult = service.files().list()
-				.setQ(folderQuery)
-				.setSpaces("drive")
-				.setFields("files(id, name)")
-				.setSupportsAllDrives(true)
-				.setIncludeItemsFromAllDrives(true)
-				.execute();
+		// Process files at this level
+		if (!files.isEmpty()) {
+			logger.info("Trovati {} file in {}/{}{}", files.size(), year, month,
+					relativePath.isEmpty() ? "" : "/" + relativePath);
 
-		if (folderResult.getFiles() != null) {
-			for (File folder : folderResult.getFiles()) {
-				collectFilesRecursive(service, folder.getId(), result);
+			// Group by normalizeToGroupKey; files without date pattern use parent folder name
+			String folderFallbackKey;
+			if (relativePath != null && !relativePath.isEmpty()) {
+				int lastSlash = relativePath.lastIndexOf('/');
+				folderFallbackKey = (lastSlash >= 0) ? relativePath.substring(lastSlash + 1) : relativePath;
+			} else {
+				folderFallbackKey = "misc";
+			}
+			Map<String, List<File>> groups = new HashMap<>();
+			for (File f : files) {
+				String dateFromName = extractDateCompactFromFileName(f.getName());
+				String key;
+				if (dateFromName == null) {
+					key = folderFallbackKey;
+				} else {
+					key = normalizeToGroupKey(f.getName());
+				}
+				groups.computeIfAbsent(key, k -> new ArrayList<>()).add(f);
+			}
+
+			long maxZipBytes = Settings.glacier.maxZipSizeMB * 1024L * 1024L;
+
+			for (Map.Entry<String, List<File>> entry : groups.entrySet()) {
+				String groupKey = entry.getKey();
+				List<File> groupFiles = entry.getValue();
+
+				logger.info("Glacier gruppo \"{}\" : {} file", groupKey, groupFiles.size());
+
+				// Create temp directory under workingDir/tmp
+				Path tmpBase = Paths.get(Settings.workingDir, "tmp");
+				Files.createDirectories(tmpBase);
+				Path tempDir = Files.createTempDirectory(tmpBase, "glacier_");
+				try {
+					// Create ZIP archives
+					List<java.io.File> zips = createZipArchives(service, groupFiles, groupKey, maxZipBytes, tempDir);
+
+					// Ensure glacier destination path: glacier.id/YYYY/MM/[relativePath]
+					List<String> pathSegments = new ArrayList<>();
+					pathSegments.add(year);
+					pathSegments.add(month);
+					if (!relativePath.isEmpty()) {
+						for (String seg : relativePath.split("/")) {
+							if (!seg.isEmpty()) pathSegments.add(seg);
+						}
+					}
+					String glacierFolderId = ensureRemotePath(service, Settings.folder.glacier.id, pathSegments);
+
+					// Upload ZIPs
+					for (java.io.File zip : zips) {
+						uploadFile(service, glacierFolderId, zip);
+						glacierZipsCreated.incrementAndGet();
+					}
+
+					// Delete original files from Drive
+					for (File f : groupFiles) {
+						deleteDriveFile(service, f.getId(), f.getName());
+						glacierFilesArchived.incrementAndGet();
+					}
+				} finally {
+					// Cleanup temp directory
+					try {
+						Files.walk(tempDir)
+								.sorted((a, b) -> b.compareTo(a))
+								.forEach(p -> {
+									try { Files.deleteIfExists(p); } catch (IOException ignored) {}
+								});
+					} catch (IOException ignored) {}
+				}
 			}
 		}
+
+		// Recurse into subfolders (con paginazione)
+		pageToken = null;
+		do {
+			String folderQuery = String.format("'%s' in parents and mimeType='%s' and trashed=false", folderId, FOLDER_MIME_TYPE);
+			FileList folderResult = service.files().list()
+					.setQ(folderQuery)
+					.setSpaces("drive")
+					.setFields("nextPageToken, files(id, name)")
+					.setPageToken(pageToken)
+					.setSupportsAllDrives(true)
+					.setIncludeItemsFromAllDrives(true)
+					.execute();
+
+			List<File> folders = folderResult.getFiles();
+			if (folders != null) {
+				for (File folder : folders) {
+					String newRelativePath = relativePath.isEmpty() ? folder.getName() : relativePath + "/" + folder.getName();
+					processGlacierMonth(service, folder.getId(), year, month, newRelativePath);
+				}
+			}
+			pageToken = folderResult.getNextPageToken();
+		} while (pageToken != null);
 	}
 
 	// ==================== MOVE ====================
